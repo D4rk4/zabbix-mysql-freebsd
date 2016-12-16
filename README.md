@@ -37,6 +37,6 @@ CREATE USER 'monitoring'@'localhost' IDENTIFIED BY 'P@SSW0RD';
 GRANT SELECT,REPLICATION CLIENT,PROCESS ON *.* TO 'monitoring'@'localhost';
 ```
 Also you may need install perl support packages:
-```shell
+```
 # pkg install p5-DBD-mysql p5-DBI
 ```
