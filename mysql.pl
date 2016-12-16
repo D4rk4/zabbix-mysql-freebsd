@@ -19,7 +19,7 @@ my $search_like = shift;
 my $dsn = "DBI:mysql:database=mysql;host=localhost";
 my $tmp_file = '/tmp/zbx_mysql.status';
 my $zbx_sender_file = '/tmp/zbx_mysql.sender';
-my $agentd_config = '/usr/local/etc/zabbix22/zabbix_agentd.conf';
+my $agentd_config = '/usr/local/etc/zabbix32/zabbix_agentd.conf';
 my $max_updated = 10;
 
 my $result = 0;
