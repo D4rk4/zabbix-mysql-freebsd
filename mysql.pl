@@ -1,8 +1,8 @@
 #!/usr/local/bin/perl
 
-
 use strict;
 #use warnings FATAL => 'all';
+use warnings;
 use Data::Dumper;
 use DBI;
 
@@ -16,38 +16,8 @@ my $search_like = shift;
 my $dsn = "DBI:mysql:database=mysql;host=localhost";
 my $tmp_file = '/tmp/zbx_mysql.status';
 my $zbx_sender_file = '/tmp/zbx_mysql.sender';
-my $agentd_config = '/usr/local/etc/zabbix32/zabbix_agentd.conf';
+my $agentd_config = '/usr/local/etc/zabbix22/zabbix_agentd.conf';
 my $max_updated = 10;
-
-my $result = 0;
-
-my $dbh;
-
-if ($type eq 'all')
-{
-    $result = update_all();
-}
-elsif ($type eq 'life') {
-    $result = update_all('0');
-}
-elsif ($type eq 'lld') {
-    $result = generate_lld($search_like);
-}
-elsif ($type eq 'database-data') {
-    $result = db_size($search_like);
-}
-elsif ($type eq 'lld-tables') {
-    $result = generate_lld_tables($search_like);
-}
-else {
-    $result = get_variable($type);
-}
-
-# Disconnect from the database.
-$dbh->disconnect() if defined $dbh;
-
-print $result;
-exit;
 
 sub get_status($$) {
     my $variable_name = shift;
@@ -97,23 +67,58 @@ sub get_status($$) {
     return $result;
 }
 
+sub update_all(;$) {
+    my $last_updated = 0;
+
+    if (-e $tmp_file) {
+        $last_updated = (stat($tmp_file))[9];
+    }
+
+    my $data;
+
+    if ($last_updated < (time - $max_updated)) {
+        $data = get_status(undef, undef);
+
+        open(FILE_STAT, "> $tmp_file");
+
+        foreach my $name (sort keys %{$data}) {
+            my $value = $data->{$name};
+
+            print FILE_STAT $name."\t".$value."\n" if $value ne '';
+        }
+
+        close(FILE_STAT);
+
+        chmod 0777, $tmp_file;
+    }
+    else {
+        open(FILE_STAT, "< $tmp_file");
+
+        while(<FILE_STAT>) {
+            my $str = $_;
+
+            if ($str =~ /^(.+)\t(.+)$/) {
+                $data->{$1} = $2;
+            }
+        }
+    }
+
+    return send_data($data, $type);
+}
+
 sub get_global_status($$) {
     my $variable_name = shift;
     my $strong = shift;
+    my $dbh = DBI->connect($dsn, $user, $password);
 
     my $result = { };
 
     my $query_status = 'SHOW /*!50002 GLOBAL */ STATUS';
-
     $query_status = $query_status.' like \'%'.$variable_name.'%\'' if (defined($variable_name) and !defined($strong));
     $query_status = $query_status.' like \''.$variable_name.'\'' if (defined($variable_name) and defined($strong));
 
-    $dbh = DBI->connect($dsn, $user, $password) unless defined $dbh;
-
     my $sth = $dbh->prepare($query_status);
-
     $sth->execute();
-
     while (my $ref = $sth->fetchrow_hashref()) {
         my $name = $ref->{'Variable_name'};
         my $value = $ref->{'Value'};
@@ -122,6 +127,7 @@ sub get_global_status($$) {
     }
 
     $sth->finish();
+    $dbh->disconnect();
 
     return $result;
 }
@@ -137,66 +143,49 @@ sub get_variables($$) {
     $query_variables = $query_variables.' like \'%'.$variable_name.'%\'' if (defined($variable_name) and !defined($strong));
     $query_variables = $query_variables.' like \''.$variable_name.'\'' if (defined($variable_name) and defined($strong));
 
-    $dbh = DBI->connect($dsn, $user, $password) unless defined $dbh;
-
+    my $dbh = DBI->connect($dsn, $user, $password);
     my $sth = $dbh->prepare($query_variables);
-
     $sth->execute();
-
     while (my $ref = $sth->fetchrow_hashref()) {
         my $name = $ref->{'Variable_name'};
         my $value = $ref->{'Value'};
-
         $value = 1 if ($value eq 'YES' or $value eq 'ON');
         $value = 0 if ($value eq 'NO' or $value eq 'OFF');
-
         $result->{$name} = $value;
     }
-
     $sth->finish();
+    $dbh->disconnect();
 
     return $result;
 }
 
-sub get_master_status($$) {
-    my $variable_name = shift;
-    my $strong = shift;
+sub get_master_status() {
 
     my $result = { };
 
-    $dbh = DBI->connect($dsn, $user, $password) unless defined $dbh;
-
+    my $dbh = DBI->connect($dsn, $user, $password);
     my $sth = $dbh->prepare('SHOW MASTER LOGS');
-
     $sth->execute();
-
     while (my $ref = $sth->fetchrow_hashref()) {
         $result->{'binary_log_space'} += $ref->{'File_size'} if defined($ref->{'File_size'}) and $ref->{'File_size'} > 0;
     }
-
     $sth->finish();
+    $dbh->disconnect();
 
     return $result;
 }
 
-sub get_slave_status($$) {
-    my $variable_name = shift;
-    my $strong = shift;
-
+sub get_slave_status() {
     my $result = { };
 
-    $dbh = DBI->connect($dsn, $user, $password) unless defined $dbh;
-
+    my $dbh = DBI->connect($dsn, $user, $password);
     my $sth = $dbh->prepare('SHOW SLAVE STATUS');
-
     $sth->execute();
-
     my $row = $sth->fetchrow_hashref();
-
     $sth->finish();
+    $dbh->disconnect();
 
     $row->{'Seconds_Behind_Master'} = '' if defined($row->{'Seconds_Behind_Master'}) and $row->{'Seconds_Behind_Master'} eq 'NULL';
-
     $result = $row if defined $row;
 
     return $result;
@@ -237,7 +226,7 @@ sub get_process_stats() {
         'State_Updating'                       => 0,
     };
 
-    $dbh = DBI->connect($dsn, $user, $password) unless defined $dbh;
+    my $dbh = DBI->connect($dsn, $user, $password);
 
     my $sth = $dbh->prepare('SHOW PROCESSLIST');
 
@@ -262,6 +251,7 @@ sub get_process_stats() {
     }
 
     $sth->finish();
+    $dbh->disconnect();
 
     return $result;
 }
@@ -272,15 +262,12 @@ sub get_innodb_status($$) {
 
     my $result = { };
 
-    $dbh = DBI->connect($dsn, $user, $password) unless defined $dbh;
-
+    my $dbh = DBI->connect($dsn, $user, $password);
     my $sth = $dbh->prepare('SHOW /*!50000 ENGINE*/ INNODB STATUS');
-
     $sth->execute();
-
     my $innodb = $sth->fetchrow();
-
     $sth->finish();
+    $dbh->disconnect();
 
     return parse_innodb_data($innodb);
 }
@@ -317,15 +304,12 @@ sub generate_lld($) {
 sub db_size($) {
     my $db_name = shift;
 
-    $dbh = DBI->connect($dsn, $user, $password) unless defined $dbh;
-
+    my $dbh = DBI->connect($dsn, $user, $password);
     my $sth = $dbh->prepare("SELECT SUM(data_length + index_length) as size FROM information_schema.tables WHERE table_schema = '$db_name'");
-
     $sth->execute();
-
     my $row = $sth->fetchrow_hashref();
-
     $sth->finish();
+    $dbh->disconnect();
 
     return defined($row->{'size'}) ? $row->{'size'} : 0;
 }
@@ -342,49 +326,6 @@ sub get_variable($) {
     return $var->{$search} || '';
 }
 
-sub update_all($) {
-    my $type = shift;
-    my $result;
-
-    my $last_updated = 0;
-
-    if (-e $tmp_file) {
-        $last_updated = (stat($tmp_file))[9];
-    }
-
-    my $data;
-
-    my $tmp = "$last_updated < ".time." - $max_updated";
-
-    if ($last_updated < (time - $max_updated)) {
-        $data = get_status(undef, undef);
-
-        open(FILE_STAT, "> $tmp_file");
-
-        foreach my $name (sort keys %{$data}) {
-            my $value = $data->{$name};
-
-            print FILE_STAT $name."\t".$value."\n" if $value ne '';
-        }
-
-        close(FILE_STAT);
-
-        chmod 0777, $tmp_file;
-    }
-    else {
-        open(FILE_STAT, "< $tmp_file");
-
-        while(<FILE_STAT>) {
-            my $str = $_;
-
-            if ($str =~ /^(.+)\t(.+)$/) {
-                $data->{$1} = $2;
-            }
-        }
-    }
-
-    return send_data($data, $type);
-}
 
 sub merge_hash($$) {
     my $part1 = shift;
@@ -1561,3 +1502,28 @@ sub make_bigint($$) {
 
     return $left + $right;
 }
+
+my $result = 0;
+
+if ($type eq 'all')
+{
+    $result = update_all();
+}
+elsif ($type eq 'life') {
+    $result = update_all('0');
+}
+elsif ($type eq 'lld') {
+    $result = generate_lld($search_like);
+}
+elsif ($type eq 'database-data') {
+    $result = db_size($search_like);
+}
+elsif ($type eq 'lld-tables') {
+    $result = generate_lld_tables($search_like);
+}
+else {
+    $result = get_variable($type);
+}
+
+print $result;
+exit;
